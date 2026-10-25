@@ -1,24 +1,38 @@
-import { useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
+import { Plus, X } from "@phosphor-icons/react";
 import { useQuery } from "convex/react";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
-import { useNow } from "../lib/hooks";
 import { KpiStrip } from "./KpiStrip";
-import { SlotBoard } from "./SlotBoard";
 import { ExceptionList } from "./ExceptionList";
 import { CreativeQueue } from "./CreativeQueue";
 import { ActivityFeed } from "./ActivityFeed";
-import { AddScreenForm } from "../auth/Onboarding";
-import { LiveAuctions } from "../auctions/LiveAuctions";
-import { NegotiationTimeline } from "../a2a/NegotiationTimeline";
+import { PairScreenForm } from "../screens/PairScreenForm";
+import { HostOverview } from "../demo/HostOverview";
 import { CreaoRehearsalPanel } from "./CreaoRehearsalPanel";
-
-const QUARTER_HOUR = 15 * 60 * 1000;
+import { useHashParams, useHashRoute } from "../lib/hooks";
 
 export function ConsolePage() {
   const billboards = useQuery(api.billboards.mine, {});
   const [picked, setPicked] = useState<Id<"billboards"> | null>(null);
+  const [showTools, setShowTools] = useState(false);
+  const [adding, setAdding] = useState(false);
   const billboardId = picked ?? billboards?.[0]?._id ?? null;
+  const params = useHashParams();
+  const route = useHashRoute();
+  const addRequested = params.get("add") === "1";
+  const toolsRequested = params.get("tools") === "1";
+  useEffect(() => {
+    if (addRequested) setAdding(true);
+    if (toolsRequested) setShowTools(true);
+  }, [addRequested, toolsRequested]);
+  function setAddPanel(open: boolean) {
+    setAdding(open);
+    if (!open && addRequested) {
+      params.delete("add");
+      window.location.hash = `${route}${params.size ? `?${params.toString()}` : ""}`;
+    }
+  }
 
   if (billboards === undefined) return <PageSkeleton />;
   if (billboards.length === 0) {
@@ -26,83 +40,104 @@ export function ConsolePage() {
       <main className="mx-auto flex max-w-[1400px] flex-col gap-6 px-4 py-16 md:px-6">
         <div>
           <h1 className="text-xl font-semibold">No screens yet</h1>
-          <p className="mt-2 max-w-[60ch] text-muted">Add your first screen; 12 hours of 15-minute slots go on sale right away.</p>
+          <p className="mt-2 max-w-[60ch] text-muted">
+            Pair a device to add your first display.
+          </p>
         </div>
-        <AddScreenForm />
-        <CreaoRehearsalPanel />
+        <PairScreenForm />
+        <details className="demo-tools">
+          <summary>Operational tools</summary>
+          <div><CreaoRehearsalPanel /></div>
+        </details>
       </main>
     );
   }
 
   return (
-    <main className="mx-auto max-w-[1400px] px-4 pb-16 md:px-6">
-      <div className="flex flex-wrap items-end justify-between gap-4 pt-8 pb-6">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Operator console</h1>
-          <p className="mt-1 text-sm text-muted">Live inventory, money and agent activity for your network.</p>
+    <DashboardLayout adding={adding} onToggleAdd={() => setAddPanel(!adding)}>
+      {adding && (
+        <div className="mb-8">
+          <PairScreenForm onDone={() => setAddPanel(false)} />
         </div>
-        {billboards.length > 1 && (
-          <label className="flex flex-col gap-1 text-sm">
-            <span className="text-muted">Billboard</span>
-            <select
-              className="rounded-md border border-line bg-panel px-3 py-2 text-fg"
-              value={billboardId ?? ""}
-              onChange={(e) => setPicked(e.target.value as Id<"billboards">)}
-            >
-              {billboards.map((b) => (
-                <option key={b._id} value={b._id}>
-                  {b.name}, {b.city}
-                </option>
-              ))}
-            </select>
-          </label>
-        )}
+      )}
+      <HostOverview focusDisplays={route === "/displays"} />
+      <details
+        className="demo-tools"
+        open={showTools}
+        onToggle={(e) => setShowTools(e.currentTarget.open)}
+      >
+        <summary>
+          Operational tools
+        </summary>
+        <div>
+          <CreaoRehearsalPanel />
+          {showTools && (
+            <>
+            {billboards.length > 1 && (
+              <label className="flex flex-col gap-1 text-sm">
+                <span className="text-muted">Billboard</span>
+                <select
+                  className="rounded-md border border-line bg-panel px-3 py-2 text-fg"
+                  value={billboardId ?? ""}
+                  onChange={(e) =>
+                    setPicked(e.target.value as Id<"billboards">)
+                  }
+                >
+                  {billboards.map((b) => (
+                    <option key={b._id} value={b._id}>
+                      {b.name}, {b.city}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            {billboardId && <ConsoleBody billboardId={billboardId} />}
+            {billboardId && <a className="demo-text-link" href={`#/sensor/${billboardId}`}>Audience sensor</a>}
+            </>
+          )}
+        </div>
+      </details>
+    </DashboardLayout>
+  );
+}
+
+export function DashboardLayout({ adding, onToggleAdd, children }: {
+  adding: boolean;
+  onToggleAdd: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <main className="demo-dashboard demo-container host-dashboard">
+      <div className="demo-dashboard-heading">
+        <div><h1>Overview</h1><p>Network status &amp; sales</p></div>
+        <div className="overview-actions">
+        <details className="reporting-period"><summary>Reporting window</summary><p>Ad slots: previous 24 hours and next 7 days. Revenue: confirmed bookings.</p></details>
+        <button type="button" className="demo-button demo-button-primary" aria-expanded={adding} onClick={onToggleAdd}>
+          {adding ? <X size={18} /> : <Plus size={18} />}
+          {adding ? "Close" : "Add Display"}
+        </button>
+        </div>
       </div>
-      {billboardId && <ConsoleBody billboardId={billboardId} />}
+      {children}
     </main>
   );
 }
 
 function ConsoleBody({ billboardId }: { billboardId: Id<"billboards"> }) {
-  const now = useNow(60_000);
-  const from = Math.floor(now / QUARTER_HOUR) * QUARTER_HOUR - QUARTER_HOUR;
-  const to = from + 12 * 60 * 60 * 1000;
-
   const summary = useQuery(api.dashboard.summary, {});
-  const slots = useQuery(api.slots.listForBillboard, { billboardId, from, to });
   const audience = useQuery(api.audience.recentForBillboard, { billboardId });
   const exceptions = useQuery(api.finance.openExceptions, {});
   const pending = useQuery(api.creatives.pendingReview, {});
   const activity = useQuery(api.audit.recent, {});
-  const negotiations = useQuery(api.negotiations.forWorkspace, {});
-  const dataSales = useQuery(api.a2a.dataSalesForWorkspace, {});
-
   const row = summary?.billboards.find((b) => b.billboardId === billboardId);
 
   return (
     <div className="flex flex-col gap-10">
       <KpiStrip summary={row} audience={audience} />
-      <CreaoRehearsalPanel />
       <div className="grid grid-cols-1 gap-10 lg:grid-cols-[minmax(0,1fr)_380px]">
         <div className="flex flex-col gap-10">
-          <LiveAuctions billboardId={billboardId} />
-          <SlotBoard slots={slots} />
           <ExceptionList exceptions={exceptions} />
           <CreativeQueue pending={pending} />
-          <section aria-labelledby="negotiations-heading" className="flex flex-col gap-4">
-            <div>
-              <h2 id="negotiations-heading" className="text-lg font-semibold">
-                Seller agent
-              </h2>
-              <p className="mt-1 text-sm text-muted">Buyer agents negotiating with your seller agent, and data they bought, paid over x402.</p>
-            </div>
-            <NegotiationTimeline
-              items={negotiations}
-              sales={dataSales?.recent}
-              perspective="host"
-              empty="No agent conversations yet. Buyer agents find your seller agent at /a2a/hosts/<workspace>/agent.json on the x402 server."
-            />
-          </section>
         </div>
         <ActivityFeed events={activity} />
       </div>
@@ -114,8 +149,8 @@ function PageSkeleton() {
   return (
     <main className="mx-auto max-w-[1400px] px-4 pt-8 md:px-6">
       <div className="h-7 w-56 animate-pulse rounded bg-panel" />
-      <div className="mt-8 grid grid-cols-2 gap-6 md:grid-cols-5">
-        {Array.from({ length: 5 }, (_, i) => (
+      <div className="mt-8 grid grid-cols-2 gap-6 md:grid-cols-4">
+        {Array.from({ length: 4 }, (_, i) => (
           <div key={i} className="h-16 animate-pulse rounded bg-panel" />
         ))}
       </div>

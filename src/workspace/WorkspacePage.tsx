@@ -3,7 +3,7 @@ import { useMutation, useQuery } from "convex/react";
 import type { FunctionReturnType } from "convex/server";
 import { api } from "../../convex/_generated/api";
 import { money } from "../lib/format";
-import { AddScreenForm } from "../auth/Onboarding";
+import { PairScreenForm } from "../screens/PairScreenForm";
 import { Card, CopyButton, Empty, ErrorLine, Field, Pill, Section, Skeleton, inputCls, primaryBtn, secondaryBtn, useAction } from "../customer/ui";
 
 type Workspace = FunctionReturnType<typeof api.workspaces.get>;
@@ -28,7 +28,6 @@ export function WorkspacePage() {
       </div>
       <Screens />
       <ReadyCreatives />
-      <SellerPolicy workspace={workspace} />
       <Team workspace={workspace} />
       <Payout workspace={workspace} />
     </main>
@@ -45,7 +44,7 @@ function Screens() {
   return (
     <Section
       title="Screens"
-      lead="Open the player URL full-screen on the display. The sensor URL runs the people counter on a laptop or phone facing the street."
+      lead={`Each screen is one real device, the ad machine facing people. Open ${urlFor("/screen?camera=1")} on that machine and pair it with the code it shows; it then plays ads and counts people. "Preview" only shows the screen on this computer.`}
       action={
         !adding && (
           <button type="button" className={primaryBtn} onClick={() => setAdding(true)}>
@@ -56,7 +55,7 @@ function Screens() {
     >
       {adding && (
         <div className="flex flex-col gap-2">
-          <AddScreenForm />
+          <PairScreenForm onDone={() => setAdding(false)} />
           <button type="button" className="self-start px-1 text-sm text-muted hover:text-fg" onClick={() => setAdding(false)}>
             Done
           </button>
@@ -65,7 +64,7 @@ function Screens() {
       {screens === undefined ? (
         <Skeleton />
       ) : screens.length === 0 ? (
-        <Empty>No screens yet. Add one and 12 hours of 15-minute slots go on sale.</Empty>
+        <Empty>No screens yet. Pair a device; once it's online, company agents get offers for the spot on air.</Empty>
       ) : (
         <div className="flex flex-col gap-3">
           {screens.map((s) => (
@@ -79,15 +78,13 @@ function Screens() {
                 </div>
                 <div className="flex items-center gap-3 text-sm">
                   <span className="text-muted">
-                    Base <span className="tabular font-mono text-fg">{money(s.baseRateMinor)}</span>
-                  </span>
-                  <span className="text-muted">
                     Floor <span className="tabular font-mono text-fg">{money(s.reserveFloorMinor)}</span>
                   </span>
                   <Pill tone={s.deviceStatus === "online" ? "ok" : "danger"}>{s.deviceStatus}</Pill>
                 </div>
               </div>
-              <UrlLine label="Player" url={urlFor(`/player/${s._id}`)} />
+              {s.audienceSummary && <p className="text-sm text-muted">Who is here: {s.audienceSummary}</p>}
+              <UrlLine label="Preview" url={urlFor(`/player/${s._id}`)} />
               <UrlLine label="Sensor" url={urlFor(`/sensor/${s._id}`)} />
             </Card>
           ))}
@@ -209,96 +206,6 @@ function Payout({ workspace }: { workspace: Workspace }) {
   );
 }
 
-/** Seller agent negotiation policy (ADR 0005). Owners edit; everyone sees it. */
-function SellerPolicy({ workspace }: { workspace: Workspace }) {
-  const policy = useQuery(api.a2a.negotiationPolicy, { workspaceId: workspace.workspaceId });
-  if (policy === undefined) return <Skeleton h="h-40" />;
-  return <SellerPolicyForm key={`${policy.floorRatio}:${policy.maxRounds}:${policy.offerTtlSeconds}`} workspace={workspace} policy={policy} />;
-}
-
-function SellerPolicyForm({
-  workspace,
-  policy,
-}: {
-  workspace: Workspace;
-  policy: { floorRatio: number; maxRounds: number; offerTtlSeconds: number; isDefault: boolean };
-}) {
-  const save = useMutation(api.a2a.setNegotiationPolicy);
-  const [floor, setFloor] = useState(Math.round(policy.floorRatio * 100));
-  const [rounds, setRounds] = useState(String(policy.maxRounds));
-  const [ttl, setTtl] = useState(String(policy.offerTtlSeconds));
-  const [saved, setSaved] = useState(false);
-  const { busy, error, run } = useAction();
-  const owner = workspace.myRole === "owner";
-  const dirty = floor !== Math.round(policy.floorRatio * 100) || rounds !== String(policy.maxRounds) || ttl !== String(policy.offerTtlSeconds);
-  return (
-    <Section
-      title="Seller agent"
-      lead="Your seller agent negotiates with customers' buying agents. It never agrees below the floor (a share of the live screen price, and never below each screen's price floor); its concessions shrink every round."
-    >
-      <form
-        className="flex flex-col gap-4"
-        onSubmit={async (e) => {
-          e.preventDefault();
-          setSaved(false);
-          const ok = await run(async () => {
-            await save({ workspaceId: workspace.workspaceId, floorRatio: floor / 100, maxRounds: Number(rounds), offerTtlSeconds: Number(ttl) });
-            return true;
-          });
-          if (ok) setSaved(true);
-        }}
-      >
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-          <Field label={`Floor: ${floor}% of screen price`}>
-            <input
-              type="range"
-              min={50}
-              max={100}
-              step={1}
-              value={floor}
-              disabled={!owner}
-              onChange={(e) => {
-                setFloor(Number(e.target.value));
-                setSaved(false);
-              }}
-              className="mt-2 accent-[var(--color-accent)]"
-            />
-          </Field>
-          <Field label="Max offers per negotiation">
-            <select value={rounds} disabled={!owner} onChange={(e) => setRounds(e.target.value)} className={inputCls}>
-              {Array.from({ length: 10 }, (_, i) => String(i + 1)).map((r) => (
-                <option key={r} value={r}>
-                  {r}
-                </option>
-              ))}
-            </select>
-          </Field>
-          <Field label="Each position valid for">
-            <select value={ttl} disabled={!owner} onChange={(e) => setTtl(e.target.value)} className={inputCls}>
-              {["30", "60", "120", "300", "600", "1800"].map((s) => (
-                <option key={s} value={s}>
-                  {Number(s) < 60 ? `${s} seconds` : `${Number(s) / 60} minute${s === "60" ? "" : "s"}`}
-                </option>
-              ))}
-            </select>
-          </Field>
-        </div>
-        {owner && (
-          <button type="submit" disabled={busy || !dirty} className={`${primaryBtn} self-start`}>
-            Save policy
-          </button>
-        )}
-      </form>
-      <p className="text-xs text-faint">
-        {policy.isDefault ? "Using defaults (90%, 4 offers, 2 minutes). " : ""}Buyer agents see the round limit and offer validity on your agent card; the floor stays private.
-      </p>
-      {!owner && <p className="text-sm text-muted">Only owners can change the seller agent's policy.</p>}
-      <ErrorLine error={error} />
-      {saved && <p role="status" className="text-sm text-muted">Saved. New negotiations use it.</p>}
-    </Section>
-  );
-}
-
 /** Ready creatives (ADR 0006): approve a campaign's creative for this host's screens once; flash spots can then play it instantly. */
 function ReadyCreatives() {
   const rows = useQuery(api.creatives.readyForWorkspace, {});
@@ -329,6 +236,7 @@ function ReadyCreatives() {
                 <div className="min-w-0">
                   <p className="font-medium">{r.advertiserName}</p>
                   <p className="truncate text-xs text-faint">{r.brief}</p>
+                  {r.agentNote && <p className="text-xs text-muted">{r.agentNote}</p>}
                 </div>
                 <Pill tone={r.ready ? "ok" : "muted"}>{r.ready ? "ready" : "not ready"}</Pill>
               </div>
@@ -348,3 +256,4 @@ function ReadyCreatives() {
     </Section>
   );
 }
+

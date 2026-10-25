@@ -61,7 +61,7 @@ export function Pill(props: { tone?: "accent" | "danger" | "muted" | "ok"; child
     accent: "border-accent/60 text-accent",
     danger: "border-danger/60 text-danger",
     muted: "border-line text-muted",
-    ok: "border-emerald-400/50 text-emerald-300",
+    ok: "border-ok/40 text-ok",
   }[props.tone ?? "muted"];
   return <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium ${tone}`}>{props.children}</span>;
 }
@@ -106,9 +106,12 @@ export function CopyButton(props: { value: string; label?: string }) {
   );
 }
 
-/** Dollars typed by a person -> integer cents, or null when not a positive amount. */
+/** Dollars typed by a person ("1.50", "$1.5") -> integer cents, or null when not a positive amount. */
 export function parseUsd(value: string): number | null {
-  const n = Number.parseFloat(value);
+  const t = value.trim().replace(/^\$/, "");
+  // "1", "1.5", "1.50" and ".50"; nothing after the cents.
+  if (!/^(\d+(\.\d{1,2})?|\.\d{1,2})$/.test(t)) return null;
+  const n = Number.parseFloat(t);
   if (!Number.isFinite(n) || n <= 0) return null;
   return Math.round(n * 100);
 }

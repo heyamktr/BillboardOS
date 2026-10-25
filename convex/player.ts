@@ -1,15 +1,13 @@
-import { ConvexError, v } from "convex/values";
+import { ConvexError, v, type Infer } from "convex/values";
 import { mutation, query, type QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { deviceStatus, playbackStatus, slotState } from "./schema";
 import { recordAudit } from "./lib/audit";
-import { computeScreenPrice } from "./lib/screenPrice";
-import { creativeReady, onMomentFirstFrame } from "./lib/momentHooks";
+import { YOUTUBE_CONTENT_TYPE, hasCreative } from "./lib/youtube";
+import { explorerTxUrl } from "./lib/x402/money";
 
 const CURRENT_LOOKBACK_MS = 6 * 60 * 60 * 1000;
 const NEXT_LOOKAHEAD_MS = 24 * 60 * 60 * 1000;
-const HOUSE_AD_WINDOW_MS = 12 * 60 * 60 * 1000;
-const HOUSE_AD_MAX_SLOTS = 48;
 /** Playback reports must fall within [startAt - 5 min, endAt + 30 min]. */
 const PLAYBACK_EARLY_MS = 5 * 60 * 1000;
 const PLAYBACK_LATE_MS = 30 * 60 * 1000;
@@ -25,7 +23,33 @@ const slotView = v.object({
   /** Present only when the slot is scheduled/played with an approved creative. */
   creativeUrl: v.optional(v.string()),
   contentType: v.optional(v.string()),
+  /** YouTube creative (contentType "youtube"): play it with the official embed. */
+  youtubeVideoId: v.optional(v.string()),
+  creativeTitle: v.optional(v.string()),
 });
+
+/**
+ * A campaign's creative can play on this host's screens: approved
+ * platform-wide or by this host. Same rule as momentHooks.creativeReady,
+ * plus YouTube creatives (which have no storage file).
+ */
+async function creativePlayable(ctx: QueryCtx, campaign: Doc<"campaigns">, workspaceId: Id<"workspaces"> | undefined) {
+  if (!hasCreative(campaign)) return false;
+  if (campaign.creativeStatus === "approved") return true;
+  if (!workspaceId) return false;
+  const approval = await ctx.db
+    .query("creativeApprovals")
+    .withIndex("by_workspace_and_campaign", (q) => q.eq("workspaceId", workspaceId).eq("campaignId", campaign._id))
+    .first();
+  return approval !== null;
+}
+
+async function youtubeOf(ctx: QueryCtx, campaignId: Id<"campaigns">) {
+  return await ctx.db
+    .query("youtubeCreatives")
+    .withIndex("by_campaign", (q) => q.eq("campaignId", campaignId))
+    .unique();
+}
 
 async function toSlotView(ctx: QueryCtx, slot: Doc<"slots">) {
   const view: {
@@ -38,6 +62,8 @@ async function toSlotView(ctx: QueryCtx, slot: Doc<"slots">) {
     advertiserName?: string;
     creativeUrl?: string;
     contentType?: string;
+    youtubeVideoId?: string;
+    creativeTitle?: string;
   } = { slotId: slot._id, startAt: slot.startAt, endAt: slot.endAt, state: slot.state };
   if (!slot.bookingId) return view;
   const booking = await ctx.db.get(slot.bookingId);
@@ -49,11 +75,21 @@ async function toSlotView(ctx: QueryCtx, slot: Doc<"slots">) {
   const advertiser = await ctx.db.get(campaign.advertiserId);
   if (advertiser) view.advertiserName = advertiser.displayName;
   const playable = slot.state === "scheduled" || slot.state === "played";
-  if (playable && campaign.creativeStorageId && (await creativeReady(ctx, campaign, slot.workspaceId))) {
-    const url = await ctx.storage.getUrl(campaign.creativeStorageId);
-    if (url) {
-      view.creativeUrl = url;
-      view.contentType = campaign.creativeContentType;
+  if (playable && (await creativePlayable(ctx, campaign, slot.workspaceId))) {
+    if (campaign.creativeContentType === YOUTUBE_CONTENT_TYPE) {
+      const yt = await youtubeOf(ctx, campaign._id);
+      if (yt) {
+        view.creativeUrl = yt.url;
+        view.contentType = YOUTUBE_CONTENT_TYPE;
+        view.youtubeVideoId = yt.videoId;
+        if (yt.title) view.creativeTitle = yt.title;
+      }
+    } else if (campaign.creativeStorageId) {
+      const url = await ctx.storage.getUrl(campaign.creativeStorageId);
+      if (url) {
+        view.creativeUrl = url;
+        view.contentType = campaign.creativeContentType;
+      }
     }
   }
   return view;
@@ -70,12 +106,7 @@ export const nowPlaying = query({
     billboard: v.object({ name: v.string(), city: v.string(), deviceStatus }),
     current: v.union(v.null(), slotView),
     next: v.union(v.null(), slotView),
-    houseAd: v.object({
-      /** Price-free tagline; render fromPriceMinor separately. */
-      message: v.string(),
-      /** Cheapest available slot in the next 12h; null if sold out. */
-      fromPriceMinor: v.union(v.number(), v.null()),
-    }),
+    houseAd: v.object({ message: v.string() }),
   }),
   handler: async (ctx, args) => {
     const at = args.atMinute;
@@ -111,27 +142,8 @@ export const nowPlaying = query({
       .first();
     const next = nextSlot ? await toSlotView(ctx, nextSlot) : null;
 
-    // House ad: cheapest available upcoming slot, priced by the same policy as quotes.
-    const upcoming = await ctx.db
-      .query("slots")
-      .withIndex("by_billboard_and_startAt", (q) =>
-        q
-          .eq("billboardId", billboard._id)
-          .gt("startAt", at)
-          .lte("startAt", at + HOUSE_AD_WINDOW_MS),
-      )
-      .take(HOUSE_AD_MAX_SLOTS);
-    const available = upcoming.filter((s) => s.state === "available");
-    let fromPriceMinor: number | null = null;
-    if (available.length > 0) {
-      // Same screen-price harness as quotes (all stages), priced in one pass.
-      const { price } = await computeScreenPrice(ctx.db, billboard, available, at);
-      fromPriceMinor = Math.min(...price.slotPrices.map((p) => p.amountMinor));
-    }
-    const message =
-      fromPriceMinor === null
-        ? `${billboard.name} is fully booked for the next 12 hours.`
-        : `Book 15 minutes on ${billboard.name} with BillboardOS.`;
+    // House ad: agents buy the spot on air; there is no posted price.
+    const message = `Advertise on ${billboard.name} with BillboardOS.`;
 
     return {
       billboard: {
@@ -141,7 +153,7 @@ export const nowPlaying = query({
       },
       current,
       next,
-      houseAd: { message, fromPriceMinor },
+      houseAd: { message },
     };
   },
 });
@@ -249,8 +261,6 @@ export const recordPlayback = mutation({
       },
     });
 
-    // Live moment (ADR 0006): first frame stops the stopwatch.
-    if (args.status === "played") await onMomentFirstFrame(ctx, booking._id, now);
 
     return { playbackEventId, slotState: newState, replayed: false };
   },
@@ -262,7 +272,15 @@ export const recordPlayback = mutation({
  */
 export const readyCreatives = query({
   args: { billboardId: v.id("billboards") },
-  returns: v.array(v.object({ campaignId: v.id("campaigns"), url: v.string(), contentType: v.union(v.string(), v.null()) })),
+  returns: v.array(
+    v.object({
+      campaignId: v.id("campaigns"),
+      /** File URL, or the thumbnail for a YouTube creative (warmed, not the video). */
+      url: v.string(),
+      contentType: v.union(v.string(), v.null()),
+      youtubeVideoId: v.optional(v.string()),
+    }),
+  ),
   handler: async (ctx, args) => {
     const billboard = await ctx.db.get(args.billboardId);
     if (!billboard?.workspaceId) return [];
@@ -274,10 +292,109 @@ export const readyCreatives = query({
     const out = [];
     for (const a of approvals) {
       const campaign = await ctx.db.get(a.campaignId);
-      if (!campaign?.creativeStorageId || campaign.status !== "active") continue;
+      if (!campaign || !hasCreative(campaign) || campaign.status !== "active") continue;
+      if (campaign.creativeContentType === YOUTUBE_CONTENT_TYPE) {
+        const yt = await youtubeOf(ctx, campaign._id);
+        if (yt) out.push({ campaignId: campaign._id, url: yt.thumbnailUrl, contentType: YOUTUBE_CONTENT_TYPE, youtubeVideoId: yt.videoId });
+        continue;
+      }
+      if (!campaign.creativeStorageId) continue;
       const url = await ctx.storage.getUrl(campaign.creativeStorageId);
       if (url) out.push({ campaignId: campaign._id, url, contentType: campaign.creativeContentType ?? null });
     }
     return out;
+  },
+});
+
+/**
+ * What the display shows. Each 30-second window plays the round that won it
+ * (only once it is paid with a settlement transaction); otherwise our house
+ * ad. Meanwhile the next window's round is bidding. The query never reads
+ * the clock: it returns the recent windows with their times and the client
+ * picks the one on air now, so the subscription never churns.
+ */
+const creativeView = v.object({
+  provider: v.union(v.literal("file"), v.literal("youtube")),
+  youtubeVideoId: v.union(v.string(), v.null()),
+  title: v.union(v.string(), v.null()),
+});
+const windowView = v.object({
+  roundId: v.id("rounds"),
+  campaignId: v.union(v.id("campaigns"), v.null()),
+  spotStartAt: v.number(),
+  spotEndAt: v.number(),
+  status: v.union(v.literal("bidding"), v.literal("awarded"), v.literal("paid"), v.literal("unsold")),
+  company: v.union(v.string(), v.null()),
+  priceMinor: v.union(v.number(), v.null()),
+  txShort: v.union(v.string(), v.null()),
+  txUrl: v.union(v.string(), v.null()),
+  creative: v.union(creativeView, v.null()),
+});
+
+async function windowOf(ctx: QueryCtx, round: Doc<"rounds">): Promise<Infer<typeof windowView>> {
+  const winner = round.winnerBidId ? await ctx.db.get(round.winnerBidId) : null;
+  const campaign = winner ? await ctx.db.get(winner.campaignId) : null;
+  let creative: Infer<typeof creativeView> | null = null;
+  if (campaign?.creativeContentType === YOUTUBE_CONTENT_TYPE) {
+    const yt = await youtubeOf(ctx, campaign._id);
+    if (yt) creative = { provider: "youtube", youtubeVideoId: yt.videoId, title: yt.title ?? null };
+  } else if (campaign?.creativeStorageId) {
+    creative = { provider: "file", youtubeVideoId: null, title: null };
+  }
+  // Only a settlement transaction hash counts as proof of payment.
+  const tx = round.status === "paid" ? (round.paymentTx ?? null) : null;
+  return {
+    roundId: round._id,
+    campaignId: campaign?._id ?? null,
+    spotStartAt: round.spotStartAt,
+    spotEndAt: round.spotEndAt,
+    status: round.status,
+    company: winner ? ((await ctx.db.get(winner.advertiserId))?.displayName ?? "A company") : null,
+    priceMinor: round.priceMinor ?? null,
+    txShort: tx ? `${tx.slice(0, 6)}…${tx.slice(-4)}` : null,
+    txUrl: tx && round.paymentNetwork ? (explorerTxUrl(round.paymentNetwork, tx) ?? null) : null,
+    creative,
+  };
+}
+
+export const screenState = query({
+  args: { billboardId: v.id("billboards") },
+  returns: v.object({
+    screenName: v.string(),
+    /** The round selling the next window (who offered what stays private: counts only). */
+    bidding: v.union(
+      v.null(),
+      v.object({ closesAt: v.number(), windowStartAt: v.number(), offered: v.number(), answered: v.number(), agreed: v.number(), peopleInView: v.union(v.number(), v.null()) }),
+    ),
+    /** The latest windows, newest first; the client plays the paid one whose time covers now. */
+    windows: v.array(windowView),
+  }),
+  handler: async (ctx, args) => {
+    const billboard = await ctx.db.get(args.billboardId);
+    if (!billboard) throw new ConvexError({ code: "NOT_FOUND", message: "Billboard not found" });
+    const rounds = await ctx.db
+      .query("rounds")
+      .withIndex("by_billboard_and_createdAt", (q) => q.eq("billboardId", billboard._id))
+      .order("desc")
+      .take(3);
+    const open = rounds.find((r) => r.status === "bidding") ?? null;
+    let bidding = null;
+    if (open) {
+      const bids = await ctx.db
+        .query("roundBids")
+        .withIndex("by_round", (q) => q.eq("roundId", open._id))
+        .take(20);
+      bidding = {
+        closesAt: open.closesAt,
+        windowStartAt: open.spotStartAt,
+        offered: bids.length,
+        answered: bids.filter((b) => b.amountMinor !== null || b.status === "passed").length,
+        agreed: bids.filter((b) => b.status === "bid").length,
+        peopleInView: open.crowd,
+      };
+    }
+    const windows = [];
+    for (const r of rounds) if (r.status !== "bidding") windows.push(await windowOf(ctx, r));
+    return { screenName: billboard.name, bidding, windows };
   },
 });

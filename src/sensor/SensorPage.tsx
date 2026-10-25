@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery } from "convex/react";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
-import { errorMessage, money } from "../lib/format";
+import { errorMessage } from "../lib/format";
 import { useNow } from "../lib/hooks";
 import { useArrivalCounter } from "./useArrivalCounter";
 
@@ -18,9 +18,9 @@ export function SensorPage({ billboardId }: { billboardId: Id<"billboards"> }) {
   const [error, setError] = useState<string | null>(null);
   const { state, takeWindow } = useArrivalCounter(video, cameraOn);
   const addArrivals = useMutation(api.audience.addArrivals);
-  const setBaseline = useMutation(api.billboards.setAudienceBaseline);
+  const setUsual = useMutation(api.billboards.setUsualInView);
   const billboards = useQuery(api.billboards.list);
-  const baseline = billboards?.find((b) => b._id === billboardId)?.audienceBaselinePerBucket ?? 120;
+  const baseline = billboards?.find((b) => b._id === billboardId)?.usualInView ?? 3;
   const [baselineDraft, setBaselineDraft] = useState<string>("");
 
   const now = useNow(1000);
@@ -49,22 +49,13 @@ export function SensorPage({ billboardId }: { billboardId: Id<"billboards"> }) {
   async function saveBaseline() {
     const value = Number(baselineDraft);
     if (!Number.isInteger(value) || value < 1) {
-      setError("Normal traffic must be a whole number of people, at least 1.");
+      setError("Usually in view must be a whole number of people, at least 1.");
       return;
     }
     try {
-      await setBaseline({ billboardId, peoplePer15Min: value });
+      await setUsual({ billboardId, usualInView: value });
       setBaselineDraft("");
       setError(null);
-    } catch (err) {
-      setError(errorMessage(err));
-    }
-  }
-
-  async function simulate() {
-    try {
-      await addArrivals({ billboardId, arrivals: 10, peakInView: 4, confidence: 1, source: "simulated" });
-      setLastSent("10 simulated arrivals");
     } catch (err) {
       setError(errorMessage(err));
     }
@@ -96,6 +87,12 @@ export function SensorPage({ billboardId }: { billboardId: Id<"billboards"> }) {
                   />
                 ) : null,
               )}
+            </div>
+          )}
+          {cameraOn && state.status === "running" && (
+            <div className="pointer-events-none absolute top-3 right-3 rounded-md border border-line bg-ink/80 px-3 py-1.5 text-sm text-muted">
+              <span className="tabular font-mono text-2xl text-fg">{state.inView}</span>{" "}
+              {state.inView === 1 ? "person" : "people"} in view
             </div>
           )}
           {!cameraOn && (
@@ -146,10 +143,6 @@ export function SensorPage({ billboardId }: { billboardId: Id<"billboards"> }) {
         <dl className="grid grid-cols-2 gap-6">
           <Figure label="In view now" value={state.status === "running" ? String(state.inView) : "None"} />
           <Figure label="Arrivals this 15 min" value={bucket ? String(bucket.countEstimate) : "0"} />
-          <Figure
-            label="Screen price from"
-            value={screen?.houseAd.fromPriceMinor != null ? money(screen.houseAd.fromPriceMinor) : "None"}
-          />
           <Figure label="Source" value={bucket ? bucket.source : "None"} />
         </dl>
         <div className="flex flex-col gap-2 text-sm">
@@ -162,7 +155,7 @@ export function SensorPage({ billboardId }: { billboardId: Id<"billboards"> }) {
         </div>
         <div className="border-t border-line pt-6">
           <label className="flex flex-col gap-2 text-sm">
-            <span className="text-muted">Normal traffic here, people per 15 minutes (now {baseline})</span>
+            <span className="text-muted">People usually in view of this screen (now {baseline})</span>
             <div className="flex gap-2">
               <input
                 inputMode="numeric"
@@ -181,17 +174,7 @@ export function SensorPage({ billboardId }: { billboardId: Id<"billboards"> }) {
               </button>
             </div>
           </label>
-          <p className="mt-2 text-xs text-faint">Prices rise when more people pass than this, and fall when fewer do.</p>
-        </div>
-        <div className="border-t border-line pt-6">
-          <p className="text-sm text-muted">No camera at the venue? Send labeled simulated traffic instead.</p>
-          <button
-            type="button"
-            onClick={simulate}
-            className="mt-3 rounded-md border border-line px-3 py-1.5 text-sm text-muted hover:text-fg"
-          >
-            Add 10 simulated arrivals
-          </button>
+          <p className="mt-2 text-xs text-faint">When the camera sees more people than this, offers go up (up to 3×).</p>
         </div>
       </aside>
     </main>
